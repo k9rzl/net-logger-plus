@@ -63,9 +63,13 @@ Set `CI=1` for one retry and an HTML report.
 
 The script starts its own throw-away server and fake QRZ service (ports 3300 and 3301), fills them with demo
 nets and operators, and saves: `home`, `home-signed-out`, `net-control`, `net-logger`, `net-visitor` (desktop) and
-`net-phone` (390 px phone layout). It never touches your real data. `npm run screenshots -- --check` seeds
-the demo data and verifies it without opening a browser. Add the PNGs to this README with
-`![Live net, as net control](docs/screenshots/net-control.png)` once you have generated them.
+`net-phone` (390 px phone layout) and `profile` (the profile-picture controls). It never touches your real data. `npm run screenshots -- --check` seeds
+the demo data and verifies it without opening a browser. The script also seeds demo profile pictures (a few operators have one, the stations net control checked in do not, so
+both looks are shown), and `--chrome PATH` (or `CHROME_PATH`) runs it with a Chromium you already have.
+
+![Live net, as net control: photos beside each callsign](docs/screenshots/net-control.png)
+![Your profile, with Choose photo and Remove photo](docs/screenshots/profile.png)
+![A net on a phone](docs/screenshots/net-phone.png)
 
 ## Loggers
 

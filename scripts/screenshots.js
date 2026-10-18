@@ -7,12 +7,14 @@
 //
 // Options: --out DIR   where to write the PNGs (default docs/screenshots)
 //          --check     seed the demo data and verify it, without opening a browser
+//          --chrome P  use this Chromium/Chrome binary instead of Playwright's own (or set CHROME_PATH)
 //
 // It starts its own throw-away server (port 3300) and fake QRZ service (port 3301), so it never touches
 // your real data or the real QRZ.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
+import zlib from 'node:zlib';
 import path from 'node:path';
 import { ROOT } from '../src/config.js';
 
@@ -42,6 +44,34 @@ async function waitFor(url, what) {
   throw new Error(`${what} did not start (${url})`);
 }
 
+/** A plain 256 px demo portrait (gradient, head and shoulders) as a PNG, made without any image library. */
+function demoPortrait([r1, g1, b1], [r2, g2, b2]) {
+  const N = 256;
+  const raw = Buffer.alloc(N * (N * 3 + 1));
+  for (let y = 0; y < N; y++) {
+    raw[y * (N * 3 + 1)] = 0; // filter type: none
+    for (let x = 0; x < N; x++) {
+      const t = (x + y) / (2 * N);
+      let c = [r1 + (r2 - r1) * t, g1 + (g2 - g1) * t, b1 + (b2 - b1) * t];
+      const head = (x - 128) ** 2 + (y - 100) ** 2 < 46 ** 2;
+      const body = ((x - 128) / 92) ** 2 + ((y - 252) / 96) ** 2 < 1;
+      if (head || body) c = [236, 240, 244];
+      const o = y * (N * 3 + 1) + 1 + x * 3;
+      raw[o] = c[0]; raw[o + 1] = c[1]; raw[o + 2] = c[2];
+    }
+  }
+  const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const head = Buffer.alloc(4); head.writeUInt32BE(data.length);
+    const tail = Buffer.alloc(4); tail.writeUInt32BE(crc(body));
+    return Buffer.concat([head, body, tail]);
+  };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(N, 0); ihdr.writeUInt32BE(N, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
 let ipSeq = 0;
 const nextIp = () => `10.9.0.${++ipSeq}`; // the server rate-limits sign-ins per client address
 
@@ -65,6 +95,10 @@ function person() {
     ip,
     call,
     session: () => cookie.replace(/^nl_session=/, ''),
+    async setPhoto(png) {
+      const res = await fetch(`${APP}/api/me/avatar`, { method: 'POST', headers: { 'x-net-logger-plus': '1', 'x-forwarded-for': ip, 'content-type': 'image/png', cookie }, body: png });
+      if (!res.ok) throw new Error(`photo upload failed (${res.status})`);
+    },
     async signIn(email, callsign, name, location) {
       const r = await call('POST', '/api/auth/request', { email });
       await call('POST', '/api/auth/verify', { token: r.devLink.split('#')[1] });
@@ -79,6 +113,11 @@ async function seed() {
   await alice.signIn('alice@example.org', 'W1AW', 'Hiram', 'Albany, NY');
   await bob.signIn('bob@example.org', 'K1ABC', 'Bob', 'Ottawa, Canada');
   await carol.signIn('carol@example.org', 'N3QRS', 'Carol', 'Harrisburg, PA');
+
+  // Alice, Bob and Carol have photos; the stations net control checks in with /ci do not, so the page shows both looks.
+  await alice.setPhoto(demoPortrait([20, 110, 130], [90, 190, 210]));
+  await bob.setPhoto(demoPortrait([200, 120, 30], [240, 190, 90]));
+  await carol.setPhoto(demoPortrait([110, 60, 160], [190, 140, 220]));
 
   const make = async (name, frequency, mode, description) =>
     (await alice.call('POST', '/api/nets', { name, frequency, mode, description })).id;
@@ -116,6 +155,8 @@ async function check({ live }) {
   if (!by.N3QRS?.hand) problems.push('N3QRS should have a hand up');
   if (by.N0TST?.state !== 'out') problems.push('N0TST should be checked out');
   if (by.W2XYZ?.info?.name !== 'Pat') problems.push('QRZ details did not arrive');
+  if (!by.W1AW?.avatar || !by.K1ABC?.avatar || !by.N3QRS?.avatar) problems.push('the demo photos did not reach the ledger');
+  if (by.W2XYZ?.avatar) problems.push('W2XYZ should have no photo');
   if (problems.length) throw new Error(`Demo data is not as expected:\n- ${problems.join('\n- ')}`);
   console.log(`Demo data OK: ${net.stations.length} stations, ${net.log.length} log lines.`);
 }
@@ -142,13 +183,14 @@ async function main() {
     } catch {
       throw new Error('Playwright is not installed. Run: npm install && npm run test:e2e:install');
     }
-    const browser = await chromium.launch().catch((e) => {
+    const chrome = value('chrome') || process.env.CHROME_PATH;
+    const browser = await chromium.launch(chrome ? { executablePath: chrome, args: ['--no-sandbox'] } : {}).catch((e) => {
       throw new Error(`Could not start Chromium (${e.message.split('\n')[0]}). Run: npm run test:e2e:install`);
     });
     fs.mkdirSync(outDir, { recursive: true });
 
     // Each shot is a separate browser context: a visitor, or someone signed in with the session made above.
-    const shoot = async (name, { as, hash, size, wait }) => {
+    const shoot = async (name, { as, hash, size, wait, click, then }) => {
       const context = await browser.newContext({
         viewport: size,
         deviceScaleFactor: 2,
@@ -159,6 +201,8 @@ async function main() {
       const page = await context.newPage();
       await page.goto(`/#/${hash}`);
       await page.waitForSelector(wait, { timeout: 10_000 });
+      if (click) await page.getByText(click, { exact: true }).click();
+      if (then) await page.waitForSelector(then, { timeout: 10_000 });
       await page.waitForTimeout(500);
       await page.screenshot({ path: path.join(outDir, `${name}.png`), fullPage: true });
       await context.close();
@@ -170,6 +214,7 @@ async function main() {
     const net = `net/${demo.live}`;
     const ledger = '.ledger tbody tr .op';
     await shoot('home', { as: demo.alice, hash: '', size: desktop, wait: '.nets li .net-row' });
+    await shoot('profile', { as: demo.alice, hash: '', size: desktop, wait: '.nets li .net-row', click: 'Your profile', then: '.photo img.avatar' });
     await shoot('home-signed-out', { hash: '', size: desktop, wait: '.nets li .net-row' });
     await shoot('net-control', { as: demo.alice, hash: net, size: desktop, wait: ledger });
     await shoot('net-logger', { as: demo.bob, hash: net, size: desktop, wait: ledger });
