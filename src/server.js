@@ -11,6 +11,7 @@ import * as domain from './domain.js';
 import * as chat from './chat.js';
 import { MongoStore } from './mongostore.js';
 import { createQrz } from './qrz.js';
+import { createAvatarStore, AVATAR_TYPES, MAX_AVATAR_BYTES } from './avatars.js';
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -45,6 +46,7 @@ export function createApp({ config, store, auth, sendMail, qrz = createQrz({}) }
   const allow = createLimiter();
   const hub = createHub();
   const PUBLIC_DIR = path.join(ROOT, 'public');
+  const avatars = createAvatarStore(config.avatarDir || path.join(ROOT, 'data', 'avatars'));
 
   const clientIp = (req) => {
     if (config.trustProxy) {
@@ -147,13 +149,54 @@ export function createApp({ config, store, auth, sendMail, qrz = createQrz({}) }
     if (!result.ok) throw new HttpError(400, result.error);
   };
 
+  /** The profile as the page sees it. The picture is only mentioned once there is one. */
+  const profileOut = (email, u) => ({
+    email,
+    callsign: u.callsign,
+    name: u.name ?? null,
+    location: u.location ?? null,
+    ...(u.avatar?.id ? { avatar: `/avatars/${u.avatar.id}` } : {}),
+  });
+
+  /** Keep the ledgers of nets still running in step with an edited name, location or picture. Closed nets keep history. */
+  function syncStations(email, call, fields) {
+    for (const net of Object.values(store.data.nets)) {
+      if (net.status === 'closed') continue;
+      let touched = false;
+      for (const st of net.stations) {
+        if (st.email !== email || st.callsign !== call) continue;
+        for (const [k, v] of Object.entries(fields)) {
+          if ((st[k] ?? null) !== v) {
+            st[k] = v;
+            touched = true;
+          }
+        }
+      }
+      if (touched) changed(net);
+    }
+  }
+
+  async function readImage(req) {
+    const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (!AVATAR_TYPES[type]) throw new HttpError(415, 'Send a JPEG, PNG or WebP picture.');
+    if (Number(req.headers['content-length']) > MAX_AVATAR_BYTES) throw new HttpError(413, 'That picture is too large.');
+    let size = 0;
+    const chunks = [];
+    for await (const c of req) {
+      size += c.length;
+      if (size > MAX_AVATAR_BYTES) throw new HttpError(413, 'That picture is too large.');
+      chunks.push(c);
+    }
+    return Buffer.concat(chunks);
+  }
+
   const routes = [];
   const route = (method, pattern, handler) => routes.push([method, new RegExp(`^${pattern}$`), handler]);
 
   route('GET', '/api/me', (req, res) => {
     const s = auth.sessionFromCookie(req.headers.cookie);
     json(res, 200, {
-      user: s ? { email: s.email, callsign: s.user.callsign, name: s.user.name ?? null, location: s.user.location ?? null } : null,
+      user: s ? profileOut(s.email, s.user) : null,
       devLinks: config.devLinks,
     });
   });
@@ -215,21 +258,40 @@ export function createApp({ config, store, auth, sendMail, qrz = createQrz({}) }
     s.user.callsign = call;
     s.user.name = who;
     s.user.location = place;
-    // Keep the ledgers of nets still running in step with an edited name or location.
-    for (const net of Object.values(store.data.nets)) {
-      if (net.status === 'closed') continue;
-      let touched = false;
-      for (const st of net.stations) {
-        if (st.email === s.email && st.callsign === call && (st.location !== place || st.name !== who)) {
-          st.location = place;
-          st.name = who;
-          touched = true;
-        }
-      }
-      if (touched) changed(net);
-    }
+    syncStations(s.email, call, { location: place, name: who });
     store.save();
-    json(res, 200, { user: { email: s.email, callsign: call, name: who, location: place } });
+    json(res, 200, { user: profileOut(s.email, s.user) });
+  });
+
+  /* ---------- Profile picture ---------- */
+
+  route('POST', '/api/me/avatar', async (req, res) => {
+    const s = requireUser(req);
+    limit(`avatar:${s.email}`, 10, 15 * MIN);
+    const buf = await readImage(req);
+    let id;
+    try {
+      id = avatars.save(buf);
+    } catch (e) {
+      throw new HttpError(400, e.message);
+    }
+    const old = s.user.avatar?.id;
+    s.user.avatar = { id, updatedAt: Date.now() };
+    if (old) avatars.remove(old);
+    if (s.user.callsign) syncStations(s.email, s.user.callsign, { avatar: id });
+    store.save();
+    json(res, 200, { avatar: `/avatars/${id}` });
+  });
+
+  route('DELETE', '/api/me/avatar', (req, res) => {
+    const s = requireUser(req);
+    limit(`avatar:${s.email}`, 10, 15 * MIN);
+    const old = s.user.avatar?.id;
+    delete s.user.avatar;
+    if (old) avatars.remove(old);
+    if (s.user.callsign) syncStations(s.email, s.user.callsign, { avatar: null });
+    store.save();
+    json(res, 200, { ok: true });
   });
 
   route('GET', '/api/nets', (req, res) => {
@@ -354,6 +416,21 @@ export function createApp({ config, store, auth, sendMail, qrz = createQrz({}) }
     json(res, 200, { ok: true });
   });
 
+  /** Public, like the ledger: a picture is only ever reachable by its random id. */
+  function serveAvatar(req, res, id) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed.');
+    const found = avatars.find(id);
+    if (!found) throw new HttpError(404, 'Not found.');
+    res.writeHead(200, {
+      'content-type': found.type,
+      'cache-control': 'public, max-age=31536000, immutable', // a new upload gets a new id, so this never goes stale
+      'content-disposition': 'inline',
+      'cross-origin-resource-policy': 'same-origin',
+    });
+    if (req.method === 'HEAD') return res.end();
+    fs.createReadStream(found.file).pipe(res);
+  }
+
   function serveStatic(req, res, pathname) {
     if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed.');
     let rel;
@@ -384,6 +461,7 @@ export function createApp({ config, store, auth, sendMail, qrz = createQrz({}) }
         }
         throw new HttpError(404, 'Not found.');
       }
+      if (pathname.startsWith('/avatars/')) return serveAvatar(req, res, pathname.slice('/avatars/'.length));
       serveStatic(req, res, pathname);
     } catch (e) {
       if (res.headersSent) return res.end();

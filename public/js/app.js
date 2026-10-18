@@ -1,4 +1,4 @@
-import { api } from './api.js';
+import { api, apiUpload } from './api.js';
 import { openNetStream } from './stream.js';
 
 const root = document.getElementById('app');
@@ -34,6 +34,36 @@ const opLine = (station) => {
   const text = [station.name || station.info?.name, place].filter(Boolean).join(' · ');
   return text ? h('div', { class: 'op' }, text) : null;
 };
+
+/** A round picture, or the callsign's first letters when there is none (or it will not load). `size` is sm, md or big. */
+function avatarEl(url, call, size = 'md') {
+  const fallback = () => h('span', { class: `avatar fallback ${size}`, 'aria-hidden': 'true' }, (call || '?').slice(0, 2));
+  if (!url) return fallback();
+  const img = h('img', { class: `avatar ${size}`, src: url, alt: '', width: size === 'big' ? '96' : size === 'sm' ? '24' : '36', height: size === 'big' ? '96' : size === 'sm' ? '24' : '36', loading: 'lazy' });
+  img.addEventListener('error', () => img.replaceWith(fallback())); // for example a picture that was replaced after a net closed
+  return img;
+}
+
+/** Shrink a chosen photo to a 256 px square JPEG in the browser: small upload, and location data in the photo is dropped. */
+async function shrinkPhoto(file) {
+  let bmp;
+  try {
+    bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    try { bmp = await createImageBitmap(file); } catch { throw new Error('That file could not be read as a picture. Try a JPEG or PNG.'); }
+  }
+  const side = Math.min(bmp.width, bmp.height); // centre-crop to a square
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff'; // transparent PNGs would turn black as JPEG
+  ctx.fillRect(0, 0, 256, 256);
+  ctx.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, 256, 256);
+  bmp.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+  if (!blob) throw new Error('Could not prepare that picture. Try a different one.');
+  return blob;
+}
 
 function teardown() {
   streams.forEach((s) => s.close());
@@ -73,6 +103,7 @@ function header() {
         }, 'Sign out'),
       ]
     : [];
+  if (me.user?.avatar) right.unshift(avatarEl(me.user.avatar, me.user.callsign, 'sm'));
   return h('header', { class: 'bar' }, h('a', { class: 'brand', href: '#/' }, 'Net Logger Plus'), h('div', { class: 'bar-right' }, right));
 }
 
@@ -132,8 +163,46 @@ function profileCard() {
   );
 }
 
+/** Profile picture: choose one from the device's saved photos (or camera roll on a phone), or remove it. */
+function photoSection() {
+  const note = msgLine();
+  const shown = h('div', { class: 'photo-now' });
+  const input = h('input', { type: 'file', id: 'photo', accept: 'image/*', class: 'sr' });
+  const remove = h('button', { type: 'button', class: 'quiet-link' }, 'Remove photo');
+  const paint = (changed = true) => {
+    shown.replaceChildren(avatarEl(me.user.avatar, me.user.callsign, 'big'));
+    remove.hidden = !me.user.avatar;
+    if (changed) document.querySelector('header.bar')?.replaceWith(header()); // the small picture beside the callsign
+  };
+  input.addEventListener('change', () => run(note, async () => {
+    const file = input.files[0];
+    input.value = '';
+    if (!file) return;
+    say(note, 'Uploading…');
+    const r = await apiUpload('/api/me/avatar', await shrinkPhoto(file));
+    me.user.avatar = r.avatar;
+    paint();
+    say(note, 'Photo saved.');
+  }));
+  remove.addEventListener('click', () => run(note, async () => {
+    await api('DELETE', '/api/me/avatar');
+    delete me.user.avatar;
+    paint();
+    say(note, 'Photo removed.');
+  }));
+  paint(false);
+  return h('div', { class: 'photo' },
+    shown,
+    h('div', { class: 'photo-actions' },
+      input,
+      h('label', { class: 'filebtn', for: 'photo' }, 'Choose photo'),
+      remove,
+      h('p', { class: 'fine' }, 'Pick a picture saved on this device. It is cropped to a square and shown next to your callsign on every net. Leave it out if you prefer.'),
+      note));
+}
+
 function profileDetails() {
-  return h('details', { class: 'card' }, h('summary', {}, 'Your profile'), ...profileForm(me.user, 'Update profile'));
+  return h('details', { class: 'card' }, h('summary', {}, 'Your profile'), photoSection(), ...profileForm(me.user, 'Update profile'));
 }
 
 function createNetCard() {
@@ -262,10 +331,16 @@ async function renderNet(id) {
     chatNote);
   chatBox.hidden = !profileComplete(me.user);
 
+  /** A chat message shows the sender's picture when they are on this net's ledger with one. */
+  const avatarFor = (call) => {
+    const url = net.stations.find((s) => s.callsign === call)?.avatar;
+    return url ? avatarEl(`/avatars/${url}`, call, 'sm') : null;
+  };
+
   function paintChat() {
     chatList.replaceChildren(...(chatMsgs.length
       ? chatMsgs.map((m) => h('li', {},
-          h('time', {}, fmtTime(m.t)), ' ', h('strong', { class: 'mcall' }, m.call), ' ', m.text,
+          avatarFor(m.call), h('time', {}, fmtTime(m.t)), ' ', h('strong', { class: 'mcall' }, m.call), ' ', m.text,
           canControl ? h('button', {
             type: 'button', class: 'link', 'aria-label': `Remove message from ${m.call}`,
             onclick: () => run(chatNote, () => api('DELETE', `/api/nets/${id}/chat/${m.id}`)),
@@ -308,12 +383,13 @@ async function renderNet(id) {
     body.replaceChildren(...(rows.length
       ? rows.map((s) => h('tr', { class: `${s.state} ${s.callsign === net.ncs ? 'ncs' : ''} ${s.state === 'in' && s.hand ? 'hand' : ''}` },
           h('td', { class: 'n' }, s.seq),
+          h('td', { class: 'pic' }, avatarEl(s.avatar && `/avatars/${s.avatar}`, s.callsign, 'md')),
           h('td', { class: 'call' }, s.callsign,
             s.callsign === net.ncs ? h('span', { class: 'tag' }, 'NCS') : s.logger ? h('span', { class: 'tag logger' }, 'LOGGER') : null,
             opLine(s)),
           h('td', { class: s.state === 'in' && s.hand ? 'hand-up' : '' }, s.state === 'out' ? 'Out' : s.hand ? [h('span', { 'aria-hidden': 'true' }, '✋'), ' Hand up'] : 'In'),
           h('td', { class: 'rst' }, s.rst || '')))
-      : [h('tr', {}, h('td', { colspan: '4', class: 'empty' }, net.status === 'live' ? 'No check-ins yet.' : 'Check-ins open when net control starts the net.'))]));
+      : [h('tr', {}, h('td', { colspan: '5', class: 'empty' }, net.status === 'live' ? 'No check-ins yet.' : 'Check-ins open when net control starts the net.'))]));
 
     log.replaceChildren(...net.log.slice().reverse().slice(0, 30).map((l) => h('li', {}, h('time', {}, fmtTime(l.t)), ' ', l.msg)));
     cmdForm.hidden = !(canControl || canLog) || net.status === 'closed';
@@ -331,7 +407,7 @@ async function renderNet(id) {
       h('a', { href: '#/', class: 'back' }, 'All nets'),
       title, dial, about, actions, note,
       h('table', { class: 'ledger' },
-        h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Order'), h('th', { scope: 'col' }, 'Callsign'), h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col' }, 'Report'))),
+        h('thead', {}, h('tr', {}, h('th', { scope: 'col' }, 'Order'), h('th', { scope: 'col' }, h('span', { class: 'sr' }, 'Photo')), h('th', { scope: 'col' }, 'Callsign'), h('th', { scope: 'col' }, 'Status'), h('th', { scope: 'col' }, 'Report'))),
         body),
       cmdForm,
       chatBox,

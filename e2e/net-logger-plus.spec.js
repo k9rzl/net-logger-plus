@@ -558,7 +558,7 @@ test('registration asks for a callsign, a name and a location, and all three are
   await page.reload();
   await page.getByText('Your profile').click();
   await expect(page.getByLabel('Callsign')).toHaveValue(call);
-  await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Hiram');
+  await expect(page.locator('#pname')).toHaveValue('Hiram'); // by id: the "Create a net" form below also has a Name field
   await expect(page.getByLabel('Location')).toHaveValue('Albany, NY');
 });
 
@@ -572,25 +572,25 @@ test('the name an operator typed is what the ledger shows, not QRZ\'s', async ({
 
 test('the ledger shows the location people typed, even when QRZ knows nothing about them', async ({ page, browser }) => {
   const nobody = unknownToQrz(); // QRZ has no record of this callsign
-  await signIn(page, nobody, undefined, 'Boise, ID');
+  await signIn(page, nobody, undefined, 'Boise, ID', 'Hiram');
   const url = await createNet(page, 'No QRZ Needed Net');
   await startNet(page);
   await page.getByRole('button', { name: 'Check in', exact: true }).click();
   await expect(row(page, nobody)).toContainText('In');
-  await expect(row(page, nobody).locator('.op')).toHaveText('Boise, ID'); // callsign + location, no subscription involved
+  await expect(row(page, nobody).locator('.op')).toHaveText('Hiram · Boise, ID'); // what they typed, no subscription involved
 
-  // someone QRZ does know: the name comes from QRZ, the location is still what they typed
+  // someone else: their typed name and location show the same way
   const bobP = await newPerson(browser);
   const bob = await signIn(bobP.page, undefined, undefined, 'Ottawa, Canada');
   await bobP.page.goto(url);
   await bobP.page.getByRole('button', { name: 'Check in', exact: true }).click();
   await expect(row(page, bob).locator('.op')).toHaveText('Pat · Ottawa, Canada');
-  await expect(row(page, nobody).locator('.op')).toHaveText('Boise, ID');
+  await expect(row(page, nobody).locator('.op')).toHaveText('Hiram · Boise, ID');
 
   // a visitor sees both lines, and never an email address
   const visitor = await newPerson(browser);
   await visitor.page.goto(url);
-  await expect(row(visitor.page, nobody).locator('.op')).toHaveText('Boise, ID');
+  await expect(row(visitor.page, nobody).locator('.op')).toHaveText('Hiram · Boise, ID');
   await expect(row(visitor.page, bob).locator('.op')).toHaveText('Pat · Ottawa, Canada');
   await expect(visitor.page.locator('body')).not.toContainText('@example.org');
   await bobP.context.close();
@@ -796,4 +796,70 @@ test('QRZ details still arrive at check-in, with no lookup box needed', async ({
   await run(page, '/ci n0tst');
   await expect(row(page, 'N0TST').locator('.op')).toHaveText('Pat · Austin, TX, United States'); // looked up automatically
   await expect(page.locator('body')).not.toContainText('Look up');
+});
+
+/* ---------- profile pictures ---------- */
+
+// A real 1x1 PNG, standing in for a photo picked from the device's saved pictures.
+const PHOTO = { name: 'me.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64') };
+const loaded = (loc) => loc.evaluate((img) => img.complete && img.naturalWidth > 0);
+
+test('profile picture: choose a photo, see it beside the callsign for everyone, then remove it', async ({ page, browser }) => {
+  const call = await signIn(page);
+  await page.getByText('Your profile').click();
+  await expect(page.locator('.photo .avatar.fallback')).toBeVisible(); // no photo yet: the callsign's letters
+  await expect(page.getByRole('button', { name: 'Remove photo' })).toBeHidden();
+
+  // a file that is not a picture is refused with a plain message
+  await page.locator('#photo').setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('not a picture') });
+  await expect(page.locator('.photo .msg.error')).toContainText(/could not be read as a picture/i);
+
+  await page.locator('#photo').setInputFiles(PHOTO);
+  await expect(page.locator('.photo .msg')).toHaveText('Photo saved.');
+  const mine = page.locator('.photo img.avatar');
+  await expect(mine).toBeVisible();
+  await expect.poll(() => loaded(mine)).toBe(true);
+  const src = await mine.getAttribute('src');
+  expect(src).toMatch(/^\/avatars\/[a-f0-9]{32}$/);
+  await expect(page.locator('.bar img.avatar')).toHaveAttribute('src', src); // and beside the callsign in the header
+  await expect(page.locator('.bar .who')).toHaveText(call);
+
+  // the browser shrank it to a JPEG before sending; the server stored that
+  const stored = await page.request.get(src);
+  expect(stored.headers()['content-type']).toBe('image/jpeg');
+  expect(stored.headers()['x-content-type-options']).toBe('nosniff');
+
+  // it shows on the ledger and in chat, live, and a visitor who never signed in sees it too
+  await createNet(page, 'Photo Net');
+  const url = page.url();
+  await startNet(page);
+  const visitor = await newPerson(browser);
+  await visitor.page.goto(url);
+  await page.getByRole('button', { name: 'Check in', exact: true }).click();
+  await expect(row(page, call).locator('img.avatar')).toHaveAttribute('src', src);
+  await expect.poll(() => loaded(row(page, call).locator('img.avatar'))).toBe(true);
+  await expect(row(visitor.page, call).locator('img.avatar')).toHaveAttribute('src', src);
+  await say(page, 'Photo check');
+  await expect(chatBox(page).locator('.chat-list li img.avatar')).toHaveAttribute('src', src);
+
+  // it survives a reload
+  await page.reload();
+  await expect(row(page, call).locator('img.avatar')).toHaveAttribute('src', src);
+
+  // removing it goes back to the letters, live for the watcher too
+  await page.getByRole('link', { name: 'All nets' }).click();
+  await page.getByText('Your profile').click();
+  await page.getByRole('button', { name: 'Remove photo' }).click();
+  await expect(page.locator('.photo .msg')).toHaveText('Photo removed.');
+  await expect(page.locator('.photo .avatar.fallback')).toBeVisible();
+  await expect(page.locator('.bar img.avatar')).toHaveCount(0);
+  await expect(row(visitor.page, call).locator('img.avatar')).toHaveCount(0);
+  await expect(row(visitor.page, call).locator('.avatar.fallback')).toHaveCount(1);
+  expect((await page.request.get(src)).status()).toBe(404);
+  await visitor.context.close();
+});
+
+test('profile picture: a photo cannot be added without signing in', async ({ request }) => {
+  const r = await request.post('/api/me/avatar', { data: Buffer.from('x'.repeat(40)), headers: { 'x-net-logger-plus': '1', 'content-type': 'image/png' } });
+  expect(r.status()).toBe(401);
 });

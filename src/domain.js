@@ -70,12 +70,15 @@ export function isControl(net, user) {
  * May this account act on this station? A station checked in by net control has no account yet
  * (email is null); the operator whose callsign it is takes it over the first time they act on it.
  */
+const avatarId = (u) => u?.avatar?.id || null;
+
 function claim(s, user) {
   if (!s || !user?.callsign || s.callsign !== user.callsign) return false;
   if (s.email == null) {
     s.email = user.email;
     if (!s.location && user.location) s.location = user.location;
     if (!s.name && user.name) s.name = user.name;
+    if (!s.avatar && avatarId(user)) s.avatar = avatarId(user);
     return true;
   }
   return s.email === user.email;
@@ -98,10 +101,11 @@ export function join(net, user, now = Date.now()) {
   if (s && !claim(s, user)) return fail(`${user.callsign} is already checked in from another account.`);
   if (s && !s.location && user.location) s.location = user.location;
   if (s && !s.name && user.name) s.name = user.name;
+  if (s && !s.avatar && avatarId(user)) s.avatar = avatarId(user);
   if (s?.state === 'in') return ok();
   if (!s) {
     if (net.stations.length >= MAX_STATIONS) return fail('This net is full.');
-    s = { callsign: user.callsign, email: user.email, location: user.location || null, name: user.name || null, logger: false, state: 'in', hand: false, handAt: null, rst: null, info: null, joinedAt: now, seq: ++net.seq };
+    s = { callsign: user.callsign, email: user.email, location: user.location || null, name: user.name || null, avatar: avatarId(user), logger: false, state: 'in', hand: false, handAt: null, rst: null, info: null, joinedAt: now, seq: ++net.seq };
     net.stations.push(s);
   } else {
     s.state = 'in';

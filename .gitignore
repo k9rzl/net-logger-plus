@@ -2,6 +2,7 @@ node_modules
 .env
 data/*.json
 data/.dev-secret
+data/avatars
 e2e/.tmp
 test-results
 playwright-report

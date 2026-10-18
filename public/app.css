@@ -121,3 +121,22 @@ button.link { border: 0; background: none; padding: 0 0.25rem; margin-left: 0.4r
 .ledger tr.hand td { background: rgba(255, 106, 85, 0.12); }
 .ledger tr.hand td:first-child { box-shadow: inset 3px 0 0 var(--onair); }
 .ledger td.hand-up { font-weight: 700; color: var(--onair); }
+
+/* Profile pictures */
+.avatar { display: inline-block; border-radius: 50%; object-fit: cover; vertical-align: middle; background: var(--rule); flex: none; }
+.avatar.sm { width: 1.5rem; height: 1.5rem; }
+.avatar.md { width: 2.25rem; height: 2.25rem; }
+.avatar.big { width: 6rem; height: 6rem; }
+.avatar.fallback { display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--edge); color: var(--muted); font: 700 0.7rem var(--mono); text-transform: uppercase; background: var(--field); }
+.avatar.fallback.big { font-size: 1.6rem; }
+.avatar.fallback.sm { font-size: 0.55rem; }
+.chat-list .avatar { margin-right: 0.35rem; }
+.ledger .pic { width: 3rem; padding-right: 0; }
+.ledger tr.out .avatar { opacity: 0.5; }
+.photo { display: flex; gap: 1rem; align-items: center; margin: 0.75rem 0 0.25rem; }
+.photo-actions { flex: 1; min-width: 0; }
+.photo-actions .fine { margin: 0.4rem 0 0; }
+.filebtn { display: inline-block; margin: 0 0.4rem 0 0; padding: 0.55rem 0.95rem; border: 1px solid var(--edge); border-radius: 4px; color: var(--accent); cursor: pointer; font-weight: 600; }
+#photo:focus-visible + .filebtn { outline: 3px solid var(--focus); outline-offset: 2px; }
+button.quiet-link { border: 0; background: none; padding: 0.55rem 0.25rem; color: var(--muted); text-decoration: underline; font-weight: 400; }
+@media (max-width: 30rem) { .ledger .n { width: 2rem; } .ledger .pic { width: 2.5rem; } .ledger td, .ledger th { padding-left: 0.4rem; padding-right: 0.4rem; } .photo { flex-direction: column; align-items: flex-start; } }

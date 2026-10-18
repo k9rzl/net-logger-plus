@@ -37,10 +37,10 @@ callsign) is listed in a notice. Net control can use `/co` on anyone; loggers ca
 
 ## Tests
 
-**`npm test`** (158 tests, no dependencies): pure logic, auth, QRZ client against sample XML, the MongoDB
+**`npm test`** (168 tests, no dependencies): pure logic, auth, QRZ client against sample XML, the MongoDB
 store and import against a fake driver, config guards (including domain and IP `BASE_URL`s), the Debian installer in every address mode, and the HTTP API including live chat streams.
 
-**`npm run test:e2e`** drives the real UI in Chromium (31 tests, about 70 s). One-time setup:
+**`npm run test:e2e`** drives the real UI in Chromium (33 tests, about 2 minutes). One-time setup:
 
     npm install
     npm run test:e2e:install       # downloads Chromium
@@ -49,7 +49,7 @@ It boots Net Logger Plus on port 3200 with a throw-away data directory, plus a f
 reads `QRZ_BASE_URL`, which is also how you would point it at a QRZ-compatible mirror), then covers:
 magic-link sign-in (and that a link works once), callsign validation, create/start/close a net,
 live check-in and hand-raise between two browsers without reloads, net control commands, chat delivery,
-history, removal and mute, QRZ details in the ledger, anonymous viewers seeing no chat,
+history, removal and mute, QRZ details in the ledger, choosing and removing a profile picture, anonymous viewers seeing no chat,
 text from users never being rendered as HTML, the CSP and security headers, and a 375 px phone layout with
 no sideways scroll. Any Content-Security-Policy violation or uncaught page error fails the test it happens in.
 On failure, screenshots and traces land in `test-results/` (`npx playwright show-trace <file>`).
@@ -106,6 +106,28 @@ nets needs no account.
   immediately; closed nets keep what was shown at the time.
 - **Existing accounts** from before the name was added are asked for it the next time they open the home page. Until
   then they can watch, but not create, join or chat (the server enforces this, not just the page).
+
+## Profile picture
+
+Signed-in operators can add a picture in **Your profile** on the home page. **Choose photo** opens the device's saved
+photos (the photo library or camera roll on a phone, the file picker on a computer). The browser centre-crops it to a
+256 px square and re-encodes it as a JPEG before sending, so uploads are tiny and any location data inside the photo is
+dropped. **Remove photo** goes back to the callsign's first letters. The picture shows beside the callsign in the page
+header, on the ledger of every net the operator is on (live, for everyone including visitors) and next to their chat
+messages. Watching nets still needs no account.
+
+- **Safe by construction.** The server looks at the file's first bytes, not at what the browser says it is: only real
+  JPEG, PNG and WebP are accepted (never SVG, which can carry scripts), at most 512 KB, and 10 changes per 15 minutes per
+  account. Files are served with `nosniff`.
+- **Unguessable addresses.** Each upload is stored under a fresh random 128-bit id (`/avatars/<id>`), never the email or
+  callsign. A new picture is a new address, so old ones are deleted and browsers can cache them for a year. Pictures are
+  public to anyone who has the address, like the ledger itself; the page never links an email to one.
+- **History.** Nets still running pick up a new or removed picture at once; a closed net keeps showing what it showed (if
+  that file has since been replaced, the letters appear instead).
+- **Where they live.** In an `avatars` folder beside the data file (`/var/lib/net-logger-plus/avatars` on the Debian
+  install), or `AVATAR_DIR`. They stay on disk even if you use MongoDB, so **back that folder up with `db.json`**.
+- **Google photo (not built yet).** The profile record already has a place for a picture, so pulling the photo from a
+  Google account can be added with Google sign-in later without changing anything here.
 
 ## Chat
 
@@ -276,6 +298,7 @@ Manual install instead: copy `deploy/net-logger-plus.service` to `/etc/systemd/s
     src/domain.js     nets, check-in, hands, net control commands (pure functions)
     src/sse.js        live updates
     src/chat.js       per-net chat
+    src/avatars.js    profile picture files (type check by bytes, random ids)
     src/qrz.js        QRZ XML client (cache, session handling)
     src/store.js      JSON file persistence (atomic writes)
     src/mongostore.js MongoDB persistence

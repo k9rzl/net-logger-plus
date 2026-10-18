@@ -89,6 +89,7 @@ export function loadConfig(env = process.env) {
     plainHttp: !base.https && !base.loopback,
     secret,
     dataFile,
+    avatarDir: path.resolve(ROOT, env.AVATAR_DIR || path.join(path.dirname(dataFile), 'avatars')), // profile pictures live beside the data file
     trustProxy: env.TRUST_PROXY === '1',
     mailWebhookUrl: env.MAIL_WEBHOOK_URL || '',
     mailWebhookToken: env.MAIL_WEBHOOK_TOKEN || '',

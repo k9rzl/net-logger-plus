@@ -65,10 +65,10 @@ function person() {
     ip,
     call,
     session: () => cookie.replace(/^nl_session=/, ''),
-    async signIn(email, callsign, location) {
+    async signIn(email, callsign, name, location) {
       const r = await call('POST', '/api/auth/request', { email });
       await call('POST', '/api/auth/verify', { token: r.devLink.split('#')[1] });
-      await call('POST', '/api/me', { callsign, location });
+      await call('POST', '/api/me', { callsign, name, location });
     },
   };
 }
@@ -76,9 +76,9 @@ function person() {
 /** Three operators, three nets, and a ledger with every kind of row the page can draw. */
 async function seed() {
   const alice = person(), bob = person(), carol = person();
-  await alice.signIn('alice@example.org', 'W1AW', 'Albany, NY');
-  await bob.signIn('bob@example.org', 'K1ABC', 'Ottawa, Canada');
-  await carol.signIn('carol@example.org', 'N3QRS', 'Harrisburg, PA');
+  await alice.signIn('alice@example.org', 'W1AW', 'Hiram', 'Albany, NY');
+  await bob.signIn('bob@example.org', 'K1ABC', 'Bob', 'Ottawa, Canada');
+  await carol.signIn('carol@example.org', 'N3QRS', 'Carol', 'Harrisburg, PA');
 
   const make = async (name, frequency, mode, description) =>
     (await alice.call('POST', '/api/nets', { name, frequency, mode, description })).id;

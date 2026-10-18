@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { Store } from '../src/store.js';
 import { createAuth } from '../src/auth.js';
 import { createApp } from '../src/server.js';
@@ -21,7 +24,8 @@ const qrzFetch = async (url) => {
 
 async function boot(t, { qrz = true, qrzRequire = false, hsts = false } = {}) {
   const store = new Store(null);
-  const config = { devLinks: true, baseUrl: 'http://localhost', secureCookie: false, trustProxy: false, qrzRequire, hsts };
+  const avatarDir = fs.mkdtempSync(path.join(os.tmpdir(), 'net-logger-plus-avatars-'));
+  const config = { devLinks: true, baseUrl: 'http://localhost', secureCookie: false, trustProxy: false, qrzRequire, hsts, avatarDir };
   const auth = createAuth({ store, secret: 's'.repeat(40) });
   const app = createApp({ config, store, auth, sendMail: async () => {}, qrz: createQrz(qrz ? { username: 'u', password: 'p', fetchFn: qrzFetch } : {}) });
   const server = http.createServer(app);
@@ -40,8 +44,18 @@ async function boot(t, { qrz = true, qrzRequire = false, hsts = false } = {}) {
       if (set) cookie = set.split(';')[0];
       return { status: res.status, body: await res.json().catch(() => ({})) };
     };
+    /** Send raw bytes (a picture) instead of JSON. */
+    const upload = async (path, body, type = 'image/jpeg') => {
+      const res = await fetch(base + path, {
+        method: 'POST',
+        headers: { 'x-net-logger-plus': '1', 'content-type': type, ...(cookie ? { cookie } : {}) },
+        body,
+      });
+      return { status: res.status, body: await res.json().catch(() => ({})) };
+    };
     return {
       call,
+      upload,
       cookie: () => cookie,
       async signIn(email, callsign) {
         const r = await call('POST', '/api/auth/request', { email });
@@ -52,7 +66,8 @@ async function boot(t, { qrz = true, qrzRequire = false, hsts = false } = {}) {
   };
   const close = () => new Promise((r) => { server.closeAllConnections(); server.close(() => r()); });
   t.after(close);
-  return { base, client, store, close };
+  t.after(() => fs.rmSync(avatarDir, { recursive: true, force: true }));
+  return { base, client, store, close, avatarDir };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -615,4 +630,113 @@ test('the shared-stream worker script is served from this site, so the strict CS
   assert.match(res.headers.get('content-type'), /javascript/);
   assert.match(res.headers.get('content-security-policy'), /script-src 'self'/);
   assert.match(await res.text(), /EventSource/);
+});
+
+/* ---------- profile pictures ---------- */
+
+// A real 1x1 PNG, and the first bytes of a JPEG and a WebP: the server looks at the bytes, not at what the client claims.
+const PNG_1PX = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+const JPEG_BYTES = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(64, 1)]);
+const WEBP_BYTES = Buffer.concat([Buffer.from('RIFF'), Buffer.from([0x24, 0, 0, 0]), Buffer.from('WEBPVP8 '), Buffer.alloc(32)]);
+
+test('profile picture: sign-in required, only real JPEG, PNG and WebP, size limited', async (t) => {
+  const s = await boot(t);
+  const anon = s.client(), alice = s.client();
+  await alice.signIn('alice@x.org', 'W1AW');
+
+  assert.equal((await anon.upload('/api/me/avatar', PNG_1PX, 'image/png')).status, 401);
+  assert.equal((await alice.upload('/api/me/avatar', PNG_1PX, 'image/svg+xml')).status, 415); // SVG can carry scripts
+  assert.equal((await alice.upload('/api/me/avatar', PNG_1PX, 'text/html')).status, 415);
+  const fake = await alice.upload('/api/me/avatar', Buffer.from('<svg onload="alert(1)"></svg> and some more text'), 'image/png');
+  assert.equal(fake.status, 400); // claims to be a PNG, is not
+  assert.match(fake.body.error, /not a JPEG, PNG or WebP/);
+  assert.equal((await alice.upload('/api/me/avatar', Buffer.concat([JPEG_BYTES, Buffer.alloc(600 * 1024)]), 'image/jpeg')).status, 413);
+  assert.equal(fs.readdirSync(s.avatarDir).length, 0, 'nothing was stored by the refusals above');
+  assert.equal((await alice.call('GET', '/api/me')).body.user.avatar, undefined);
+
+  for (const [bytes, type] of [[PNG_1PX, 'image/png'], [JPEG_BYTES, 'image/jpeg'], [WEBP_BYTES, 'image/webp']]) {
+    assert.equal((await alice.upload('/api/me/avatar', bytes, type)).status, 200, type);
+  }
+});
+
+test('profile picture: saved, served publicly with safe headers, replaced, and removed', async (t) => {
+  const s = await boot(t);
+  const alice = s.client(), anon = s.client();
+  await alice.signIn('alice@x.org', 'W1AW');
+
+  const first = await alice.upload('/api/me/avatar', PNG_1PX, 'image/png');
+  assert.equal(first.status, 200);
+  assert.match(first.body.avatar, /^\/avatars\/[a-f0-9]{32}$/);
+  assert.equal((await alice.call('GET', '/api/me')).body.user.avatar, first.body.avatar); // part of the profile now
+  assert.ok(!first.body.avatar.includes('alice') && !first.body.avatar.includes('W1AW')); // the URL gives nothing away
+
+  const img = await fetch(s.base + first.body.avatar); // no cookie: pictures are public like the ledger
+  assert.equal(img.status, 200);
+  assert.equal(img.headers.get('content-type'), 'image/png');
+  assert.equal(img.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(img.headers.get('cache-control'), /immutable/);
+  assert.deepEqual(Buffer.from(await img.arrayBuffer()), PNG_1PX);
+
+  const second = await alice.upload('/api/me/avatar', JPEG_BYTES, 'image/jpeg');
+  assert.notEqual(second.body.avatar, first.body.avatar); // a new picture is a new address
+  assert.equal((await fetch(s.base + first.body.avatar)).status, 404); // the old file is gone
+  assert.equal((await fetch(s.base + second.body.avatar)).headers.get('content-type'), 'image/jpeg');
+  assert.equal(fs.readdirSync(s.avatarDir).length, 1);
+
+  assert.equal((await alice.call('DELETE', '/api/me/avatar')).status, 200);
+  assert.equal((await fetch(s.base + second.body.avatar)).status, 404);
+  assert.equal((await alice.call('GET', '/api/me')).body.user.avatar, undefined);
+  assert.equal(fs.readdirSync(s.avatarDir).length, 0);
+  assert.equal((await anon.call('DELETE', '/api/me/avatar')).status, 401);
+});
+
+test('profile picture: odd or malicious paths find nothing', async (t) => {
+  const s = await boot(t);
+  for (const p of ['/avatars/', '/avatars/x', '/avatars/../package.json', '/avatars/%2e%2e%2fpackage.json', `/avatars/${'a'.repeat(32)}`, `/avatars/${'A'.repeat(32)}`, `/avatars/${'a'.repeat(32)}.png`]) {
+    assert.equal((await fetch(s.base + p)).status, 404, p);
+  }
+  assert.equal((await fetch(s.base + `/avatars/${'a'.repeat(32)}`, { method: 'POST', headers: { 'x-net-logger-plus': '1' } })).status, 405);
+});
+
+test('profile picture: picture uploads are limited to 10 per 15 minutes per account', async (t) => {
+  const s = await boot(t);
+  const alice = s.client();
+  await alice.signIn('alice@x.org', 'W1AW');
+  for (let i = 0; i < 10; i++) assert.equal((await alice.upload('/api/me/avatar', PNG_1PX, 'image/png')).status, 200);
+  assert.equal((await alice.upload('/api/me/avatar', PNG_1PX, 'image/png')).status, 429);
+});
+
+test('profile picture: the ledger carries it for everyone, follows changes in running nets, and never shows an email', async (t) => {
+  const s = await boot(t, { qrz: false });
+  const alice = s.client(), bob = s.client(), anon = s.client();
+  await alice.signIn('alice@x.org', 'W1AW');
+  await bob.signIn('bob@x.org', 'K1ABC');
+  const pic = (await alice.upload('/api/me/avatar', PNG_1PX, 'image/png')).body.avatar;
+  const mk = async (name) => {
+    const { body: { id } } = await alice.call('POST', '/api/nets', { name, frequency: '1', mode: 'FM' });
+    await alice.call('POST', `/api/nets/${id}/command`, { text: '/start' });
+    await alice.call('POST', `/api/nets/${id}/join`, {});
+    return id;
+  };
+  const live = await mk('Running Net');
+  const done = await mk('Finished Net');
+  await alice.call('POST', `/api/nets/${done}/command`, { text: '/close' });
+  await bob.call('POST', `/api/nets/${live}/join`, {});
+  const st = async (id, call) => (await anon.call('GET', `/api/nets/${id}`)).body.net.stations.find((x) => x.callsign === call);
+
+  assert.equal((await st(live, 'W1AW')).avatar, pic.split('/').pop()); // a visitor sees the picture id
+  assert.equal((await st(live, 'K1ABC')).avatar ?? null, null); // Bob has none
+  assert.ok(!JSON.stringify((await anon.call('GET', `/api/nets/${live}`)).body).includes('@'));
+
+  const newer = (await alice.upload('/api/me/avatar', JPEG_BYTES, 'image/jpeg')).body.avatar.split('/').pop();
+  assert.equal((await st(live, 'W1AW')).avatar, newer); // the running net follows the change...
+  assert.equal((await st(done, 'W1AW')).avatar, pic.split('/').pop()); // ...a closed net keeps what it showed
+
+  await alice.call('DELETE', '/api/me/avatar');
+  assert.equal((await st(live, 'W1AW')).avatar, null);
+
+  // someone checked in by net control gets their own picture when they take the entry over
+  await bob.upload('/api/me/avatar', PNG_1PX, 'image/png');
+  await alice.call('POST', `/api/nets/${live}/command`, { text: '/ci N0TST' });
+  assert.equal((await st(live, 'N0TST')).avatar ?? null, null);
 });
