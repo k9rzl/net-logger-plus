@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24, 26] # 20 is what Debian 13 ships; 24 is the current long-term-support release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  e2e:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm install --omit=optional # test tooling only; the MongoDB driver is not needed here
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-failures
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+
+  install-script:
+    name: Debian install script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Syntax check
+        run: bash -n deploy/install-debian.sh
+      - name: Lint (advisory)
+        continue-on-error: true
+        run: shellcheck deploy/install-debian.sh
+      - name: Install into a scratch root and check the result
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/root"
+          DESTDIR="$root" bash deploy/install-debian.sh --domain nets.example.org --caddy
+          test -f "$root/opt/net-logger-plus/src/server.js"
+          test -f "$root/etc/systemd/system/net-logger-plus.service"
+          grep -q '^BASE_URL=https://nets.example.org$' "$root/etc/net-logger-plus/net-logger-plus.env"
+          secret="$(grep '^SESSION_SECRET=' "$root/etc/net-logger-plus/net-logger-plus.env" | cut -d= -f2)"
+          test "${#secret}" -ge 32 && test "$secret" != CHANGE_ME
+          grep -q '^nets.example.org {' "$root/etc/caddy/Caddyfile"
+          # IP-address installs: default HTTPS, plain HTTP, and IPv6
+          DESTDIR="$RUNNER_TEMP/ip" bash deploy/install-debian.sh --ip 203.0.113.10 --caddy
+          grep -q '^BASE_URL=https://203.0.113.10$' "$RUNNER_TEMP/ip/etc/net-logger-plus/net-logger-plus.env"
+          grep -q 'tls internal' "$RUNNER_TEMP/ip/etc/caddy/Caddyfile"
+          DESTDIR="$RUNNER_TEMP/ip6" bash deploy/install-debian.sh --ip 2001:db8::10 --tls none --caddy
+          grep -q '^BASE_URL=http://\[2001:db8::10\]$' "$RUNNER_TEMP/ip6/etc/net-logger-plus/net-logger-plus.env"
+          # a second run must keep the generated secret
+          DESTDIR="$root" bash deploy/install-debian.sh >/dev/null
+          test "$(grep '^SESSION_SECRET=' "$root/etc/net-logger-plus/net-logger-plus.env" | cut -d= -f2)" = "$secret"

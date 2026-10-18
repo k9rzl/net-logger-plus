@@ -1,0 +1,33 @@
+{
+  "name": "net-logger-plus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hostable amateur radio net manager. No dependencies unless you choose MongoDB.",
+  "optionalDependencies": {
+    "mongodb": "^7.5.0"
+  },
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/k9rzl/net-logger-plus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/k9rzl/net-logger-plus/issues"
+  },
+  "homepage": "https://github.com/k9rzl/net-logger-plus#readme",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "DEV_LINKS=1 node src/server.js",
+    "test": "node --test",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install chromium",
+    "screenshots": "node scripts/screenshots.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.61.0"
+  }
+}

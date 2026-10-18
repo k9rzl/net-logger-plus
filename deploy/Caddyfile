@@ -1,0 +1,22 @@
+# /etc/caddy/Caddyfile
+#
+# Net Logger Plus reverse proxy. deploy/install-debian.sh writes this file for you, filling in your domain or IP
+# address (and a "tls" block for IP-only installs). If you edit it by hand, replace nets.example.org with
+# your domain or IP address.
+#
+# For a domain, Caddy gets and renews the HTTPS certificate automatically. Requirements:
+#   - a DNS A/AAAA record for the domain pointing at this server
+#   - ports 80 and 443 open to the internet
+nets.example.org {
+	# __TLS__ (filled in by the installer for IP-only installs; a domain needs nothing here)
+
+	# Compress pages and scripts, but not the API: live updates (/api/.../events) must reach
+	# browsers immediately and compression can hold them back.
+	@compressible not path /api/*
+	encode @compressible zstd gzip
+
+	reverse_proxy 127.0.0.1:3000 {
+		# Send live-update (Server-Sent Events) data straight through without buffering.
+		flush_interval -1
+	}
+}
